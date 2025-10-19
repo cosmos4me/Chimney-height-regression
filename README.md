@@ -33,13 +33,20 @@ It uses a multi-modal input (5-channel image + 1D length feature) and a custom a
 
 * **Environment:** Google Colab.
 * **Dependencies:** `torch`, `timm`, `opencv-python-headless`.
-* **Data Source:** Requires mounting Google Drive (`/content/drive`).
-* **Input Files:** `.tar` archives for images and labels (VIA JSON format).
-    * `TS_KS.tar` (Train Images), `TL_LINE.tar` (Train Labels)
-    * `VS_KS.tar` (Validation Images), `VL_LINE.tar` (Validation Labels)
-* **Data Preprocessing:**
-    * **Image:** Letterbox resizing to `(224, 224)`.
-    * **Normalization:** Z-Normalization for 1D length (input) and target height (label), using stats from the training set.
+* **Local Storage:** Requires Google Drive (`/content/drive`) for loading data.
+
+### Data Source
+* **Provider:** [AI Hub (AI허브)](https://www.aihub.or.kr)
+* **Dataset:** [대기오염 배출원 공간 분포 데이터](https://www.aihub.or.kr/aihubdata/data/view.do?currMenu=115&topMenu=100&dataSetSn=71805)
+* **Files Used (as `.zip`):**
+    * `TS_KS.zip` (Training Set Images)
+    * `TL_KS_LINE.zip` (Training Labels - VIA JSON)
+    * `VS_KS.zip` (Validation Set Images)
+    * `VL_KS_LINE.zip` (Validation Labels - VIA JSON)
+
+### Data Preprocessing
+* **Image:** Letterbox resizing to `(224, 224)`.
+* **Normalization:** Z-Normalization for 1D length (input) and target height (label), using stats from the training set.
 
 ---
 
