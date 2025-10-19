@@ -46,7 +46,6 @@ It uses a multi-modal input (5-channel image + 1D length feature) and a custom a
 ## 🚀 Usage & Result
 
 ### Training
-* Run all cells in the `Misson2_markdown+주석.ipynb` notebook.
 * The script computes normalization stats, loads data, and runs training.
 
 ### Model Saving
