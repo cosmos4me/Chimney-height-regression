@@ -1,0 +1,127 @@
+class ImageMaskHeightDataset(Dataset):
+    def __init__(self, image_dir, meta_dir, transform=None,
+                 out_size=(224, 224), compute_stats=False, stats=None):
+        self.image_dir = image_dir
+        self.meta_dir = meta_dir
+        self.transform = transform
+        self.out_h, self.out_w = out_size
+        self.samples = []                     
+        self._feat_list, self._y_list = [], []
+
+        for meta_file in os.listdir(meta_dir):
+            if not meta_file.endswith('.json'):
+                continue
+            with open(os.path.join(meta_dir, meta_file), 'r') as f:
+                meta = json.load(f)
+            for _, v in meta.items():
+                img_path = os.path.join(image_dir, v['filename'])
+                if not os.path.exists(img_path):
+                    continue
+                for r in v.get('regions', []):
+                    if not r.get('region_attributes') or 'chi_height_m' not in r['region_attributes']:
+                        continue
+                    ax = r['shape_attributes'].get('all_points_x', [])
+                    ay = r['shape_attributes'].get('all_points_y', [])
+                    if len(ax) < 2:
+                        continue
+                    y = float(r['region_attributes']['chi_height_m'])
+                    self.samples.append((img_path, ax, ay, y))
+
+        if compute_stats:
+            for img_path, ax, ay, y in self.samples:
+                img = cv2.imread(img_path)
+                if img is None:
+                    continue
+                h, w = img.shape[:2]
+                ln = poly_length_norm(ax, ay, w, h)
+                self._feat_list.append(ln)
+                self._y_list.append(y)
+            self.feat_mean = float(np.mean(self._feat_list))
+            self.feat_std  = float(np.std(self._feat_list) + 1e-8)
+            self.y_mean    = float(np.mean(self._y_list))
+            self.y_std     = float(np.std(self._y_list) + 1e-8)
+        else:
+            assert stats is not None
+            self.feat_mean, self.feat_std, self.y_mean, self.y_std = stats
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, ax, ay, y = self.samples[idx]
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w = img.shape[:2]
+
+        mask_tgt = np.zeros((h, w), dtype=np.uint8)
+        pts_px = np.stack([np.array(ax, np.int32), np.array(ay, np.int32)], axis=1)
+        cv2.polylines(mask_tgt, [pts_px], isClosed=False, color=255, thickness=dynamic_thickness(h, w))
+
+        img4 = np.dstack([img, mask_tgt])
+        img4_lb, pad_mask = letterbox_with_padmask(img4, self.out_h, self.out_w)
+        img5 = np.dstack([img4_lb, pad_mask])
+
+        length_norm = poly_length_norm(ax, ay, w, h)
+        feat_z = (length_norm - self.feat_mean) / self.feat_std
+        y_z    = (y - self.y_mean) / self.y_std
+
+        if self.transform is not None:
+            img_t = self.transform(img5)
+        else:
+            img_t = torch.from_numpy(img5.transpose(2, 0, 1)).float() / 255.0
+
+        feat_t = torch.tensor([feat_z], dtype=torch.float32)
+        y_t    = torch.tensor(y_z, dtype=torch.float32)
+        return img_t, feat_t, y_t
+
+
+class ProbFiLMGate(nn.Module):
+    def __init__(self, model_name='convnext_tiny', pretrained=True,
+                 in_chans=5, film_dim=128, gate_dim=128, alpha=0.5,
+                 logvar_min=-6.0, logvar_max=4.0, drop_path_rate=0.2):
+        super().__init__()
+        self.alpha = alpha
+        self.logvar_min = logvar_min
+        self.logvar_max = logvar_max
+
+        self.backbone = timm.create_model(
+            model_name, pretrained=pretrained, in_chans=in_chans, num_classes=0,
+            drop_path_rate=drop_path_rate
+        )
+        d = self.backbone.num_features
+
+        self.len_to_film = nn.Sequential(
+            nn.Linear(1, film_dim), nn.ReLU(),
+            nn.Linear(film_dim, 2 * d)
+        )
+
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(d + 1, 1)
+        )
+        nn.init.zeros_(self.gate_mlp[-1].bias)
+        nn.init.zeros_(self.len_to_film[-1].weight)
+        nn.init.zeros_(self.len_to_film[-1].bias)
+
+        self.head = nn.Sequential(
+            nn.Linear(d + 1, 128), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU(),
+            nn.Linear(64, 2)
+        )
+
+    def forward(self, img5, poly_z):
+        f = self.backbone(img5) 
+
+        film = self.len_to_film(poly_z)            
+        gamma, beta = torch.chunk(film, 2, dim=1)    
+        f_film = f * (1 + gamma) + beta
+
+        g = self.gate_mlp(torch.cat([f, poly_z], dim=1)) 
+        gate = 1.0 + self.alpha * torch.tanh(g)
+        len_g = poly_z * gate
+
+        out = self.head(torch.cat([f_film, len_g], dim=1))  
+        mu_z, log_var = out[:, 0], out[:, 1]
+       
+        log_var = torch.clamp(log_var, self.logvar_min, self.logvar_max)
+        return mu_z, log_var
+

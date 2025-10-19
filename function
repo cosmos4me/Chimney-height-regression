@@ -1,0 +1,110 @@
+def fast_extract_tar_and_zip_recursive(tar_path, output_folder):
+    temp_dir = "/content/temp_extract"
+    os.makedirs(temp_dir, exist_ok=True)
+    !cp "{tar_path}" /content/temp.tar
+    !tar -xf /content/temp.tar -C "{temp_dir}"
+    !rm /content/temp.tar
+
+    zip_part0_paths = []
+    for root, _, files in os.walk(temp_dir):
+        for f in files:
+            if f.endswith(".zip.part0"):
+                zip_part0_paths.append(os.path.join(root, f))
+
+    if not zip_part0_paths:
+        print(f"{tar_path} 안에서 zip.part0를 찾을 수 없습니다.")
+        !rm -rf "{temp_dir}"
+        return
+    for zp_path in zip_part0_paths:
+        !unzip -q -j "{zp_path}" -d "{output_folder}" 2>/dev/null
+
+    !rm -rf "{temp_dir}"
+
+def letterbox_with_padmask(imgC, out_h=224, out_w=224):
+    h, w = imgC.shape[:2]
+    scale = min(out_w / w, out_h / h)
+    nh, nw = int(round(h * scale)), int(round(w * scale))
+    resized = cv2.resize(imgC, (nw, nh), interpolation=cv2.INTER_LINEAR)
+
+    img_lb = np.zeros((out_h, out_w, imgC.shape[2]), dtype=resized.dtype)
+    pad_mask = np.ones((out_h, out_w), dtype=np.uint8) 
+
+    top = (out_h - nh) // 2
+    left = (out_w - nw) // 2
+
+    img_lb[top:top + nh, left:left + nw, :] = resized
+    pad_mask[top:top + nh, left:left + nw] = 0          
+
+    pad_mask = (pad_mask * 255).astype(np.uint8)
+    return img_lb, pad_mask
+
+def dynamic_thickness(h, w, k=0.004):
+    return max(1, int(k * min(h, w)))
+
+def poly_length_norm(all_x, all_y, w, h):
+    pts = np.stack([np.array(all_x, np.float32) / w,
+                    np.array(all_y, np.float32) / h], axis=1)
+    if len(pts) < 2:
+        return 0.0
+    seg = np.diff(pts, axis=0)
+    return float(np.linalg.norm(seg, axis=1).sum())
+
+def gaussian_nll(mu, log_var, target):
+    var = torch.exp(log_var)
+    return 0.5 * (log_var + (target - mu) ** 2 / var)
+
+def rmse_np(y_true, y_pred):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+@torch.no_grad()
+def eval_from_model_path(ckpt_path,
+                         VAL_IMG_DIR="/content/validation_set/",
+                         VAL_META_DIR="/content/vline_label/",
+                         model_name="convnext_base",
+                         in_chans=5,
+                         drop_path_rate=0.1,
+                         batch_size=16,
+                         num_workers=2):
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ckpt  = torch.load(ckpt_path, map_location="cpu")
+    state = ckpt.get("model", ckpt)
+    stats = ckpt["stats"]                      
+    y_mean, y_std = stats[2], stats[3]
+
+    calib = ckpt.get("calib", DEFAULT_CALIB)
+    a, b, tau = float(calib["a"]), float(calib["b"]), float(calib["tau"])
+
+    normalize = transforms.Normalize(mean=[0.485,0.456,0.406,0.5,0.5],
+                                     std =[0.229,0.224,0.225,0.5,0.5])
+    tfm = transforms.Compose([transforms.ToTensor(), normalize])
+
+    val_ds = ImageMaskHeightDataset(VAL_IMG_DIR, VAL_META_DIR, transform=tfm, compute_stats=False, stats=stats)
+    va = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+
+    model = ProbFiLMGate(model_name=model_name, pretrained=False, in_chans=in_chans, drop_path_rate=drop_path_rate).to(device)
+    model.load_state_dict(state, strict=False)
+    model.eval()
+
+    preds, sigmas, gts = [], [], []
+    for img5, feat_z, y_z in va:
+        img5, feat_z, y_z = img5.to(device), feat_z.to(device), y_z.to(device)
+        mu_z, log_var = model(img5, feat_z)
+        mu_m    = (mu_z.cpu().numpy() * y_std) + y_mean
+        sigma_m =  y_std * np.sqrt(np.exp(log_var.cpu().numpy()))
+        y_m     = (y_z.cpu().numpy()  * y_std) + y_mean
+        preds.extend(mu_m.tolist())
+
+    preds   = np.array(preds)
+    sigmas  = np.array(sigmas)
+    gts     = np.array(gts)
+
+    rmse = lambda a_, b_: float(np.sqrt(np.mean((a_ - b_)**2)))
+    rmse_base   = rmse(preds, gts)
+    rmse_mu_cal = rmse(a * preds + b, gts)
+
+    print(f"RMSE(base):  {rmse_base:.3f}")
+    print(f"RMSE(mu-cal): {rmse_mu_cal:.3f}")
