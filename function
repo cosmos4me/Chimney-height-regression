@@ -1,6 +1,6 @@
 def fast_extract_tar_and_zip_recursive(tar_path, output_folder):
     temp_dir = "/content/temp_extract"
-    os.makedirs(temp_dir, exist_ok=True)
+    os.makedirs(temp_dir, exist_ok=True) 
     !cp "{tar_path}" /content/temp.tar
     !tar -xf /content/temp.tar -C "{temp_dir}"
     !rm /content/temp.tar
