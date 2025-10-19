@@ -11,7 +11,7 @@ It uses a multi-modal input (5-channel image + 1D length feature) and a custom a
 ## 🔬 Model & Features
 
 ### Architecture
-* `convnext_tiny` backbone.
+* `convnext_base` backbone.
 
 ### Input Fusion
 * **FiLM (Feature-wise Linear Modulation):** Injects the 1D length feature into the image backbone.
